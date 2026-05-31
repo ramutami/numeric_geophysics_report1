@@ -1,0 +1,188 @@
+! 線形移流方程式を初期条件u(x)=sin(2\pi x)、領域0<x<1、周期境界条件で、一次元風上差分とLax_wendroffで解く
+! t=1まで数値解を計算し、解析解と数値解の二乗誤差を計算し、Delta_x依存性を見る
+!　というのを、\Delta_xに関するループで回す。
+
+
+
+program main
+    implicit none
+    ! 解析解u_act(:),u_n_FTBS(:),u_n_Lax(:),u_ntemp(:)(計算用に一時保存しておくやつ),解析解u_analytic(:)を用意する。
+    ! t_iに関してループを回し、各時刻におけるt;x,u_n_FTBS(:),u_n_Lax(:),u_analytic(:)を出力する。
+    ! gnuplotで時刻毎の画像ファイルを出力して、ffmpegで動画ファイルにする。
+    real(8) , allocatable :: u_act(:),u_n_FTBS(:),u_n_Lax(:),u_ntemp(:)
+    real(8) :: c_speed !移流速度(c_speed>0にする。)
+    real(8) :: delta_x,delta_t,cfl_ratio !x,tのグリッド幅及びCFL条件に関する値(c_speed*delta_t/delta_x = cfl_ratio)
+    real(8) :: t_min,t_max !一応、変えられるように
+    real(8) :: x_min,x_max !一応、変えられるように
+    integer :: meshnum_x,meshnum_t
+    real(8) :: x,t
+    integer :: i,j
+    real(8) :: pi = 4.0_8*atan(1.0_8)
+    character(len=128) :: filename
+    real(8) :: epsilon_FTBS,epsilon_LAX
+    integer :: k
+    integer, parameter :: n_cases = 14
+    integer :: meshnum_x_list(n_cases)
+
+
+    !===========パラメタ調整エリア===================
+        meshnum_x_list(1)=3
+        do i = 2,n_cases
+            meshnum_x_list(i) = 2**(i)
+            write(*,*) meshnum_x_list(i)
+        end do
+        cfl_ratio = 1.0_8/10.0_8
+        c_speed = 0.5_8
+        x_min = 0.0_8
+        x_max = 1.0_8
+        t_min = 0.0_8
+        t_max = 1.1_8
+    !=============================================
+
+    open(10,file='./dataout/epsilon.dat',status='replace',action='write')
+    write(10,*) 't:delta_x:epsilon_FTBS:epsilon_LAX'
+    do k=1,n_cases
+
+        write(*,*) k,"out of",n_cases
+
+        !===========諸々のパラメタの計算=================
+            !delta_tはCFL条件に従って、(cfl_ratio)*delta_x/cとすることにする。(ratio_grid<1)
+            if (k/=1) then
+                deallocate(u_act,u_n_FTBS,u_n_Lax,u_ntemp)
+            end if
+            meshnum_x = meshnum_x_list(k)
+            delta_x = (x_max-x_min)/real(meshnum_x,8)
+            delta_t = cfl_ratio*delta_x/c_speed
+            meshnum_t = (t_max-t_min)/real(delta_t,8)
+            allocate(u_act(0:meshnum_x-1),u_n_FTBS(0:meshnum_x-1),u_n_Lax(0:meshnum_x-1),u_ntemp(0:meshnum_x-1))
+        !=============================================
+
+        !==========初期条件の設定======================
+            do j = 0,meshnum_x-1
+                x = x_min + real(j,8)*delta_x
+                u_n_FTBS(j) = u_init(x)
+                u_n_Lax(j) = u_init(x)
+            end do
+        !===========================================
+
+        !==========主要計算部分(delta_xを動かしながら)====
+            
+            do i = 0,meshnum_t
+                write(*,*) k,"out of",n_cases,"/",t,"out of",t_max
+                t = t_min + real(i,8) * delta_t
+
+                !解析解
+                do j = 0,meshnum_x-1
+                    x = x_min + real(j,8)*delta_x
+                    u_act(j) = u_actual(x,t,c_speed)
+                end do
+
+                !誤差の計算
+                if (1.0_8 <= t .and. t < 1.0_8+delta_t) then
+                    epsilon_FTBS = 0.0_8
+                    epsilon_LAX = 0.0_8
+                    do j = 0,meshnum_x-1
+                        x = x_min + real(j,8)*delta_x 
+                        u_act(j) = u_actual(x,t,c_speed)
+                        epsilon_FTBS = epsilon_FTBS+((u_n_FTBS(j)-u_act(j))**2.0_8)*delta_x
+                        epsilon_LAX = epsilon_LAX+((u_n_Lax(j)-u_act(j))**2.0_8)*delta_x
+                    end do
+                    epsilon_FTBS = sqrt(epsilon_FTBS)
+                    epsilon_LAX = sqrt(epsilon_LAX)
+                    write(10,*) t,delta_x,epsilon_FTBS,epsilon_LAX
+                end if
+
+                !一次元風上差分
+                u_ntemp = u_n_FTBS
+                call u_FTBS_update(u_ntemp,u_n_FTBS,c_speed,delta_t,delta_x)
+
+                !lax_wendroff
+                u_ntemp = u_n_Lax
+                call u_Lax_update(u_ntemp,u_n_Lax,c_speed,delta_t,delta_x)
+
+
+
+            end do
+
+
+        !=============================================
+
+    end do
+    close(10)
+
+
+
+
+
+    stop
+    contains
+    ! 時刻t,位置xでの解析解u(x,t)を返す関数u_actual(x,t)を定義する
+    ! u^n(i=1~meshnumxベクトル)をうけて、u^n+1(i=1~meshnumxベクトル)を一次元風上差分で周期境界条件のもと返す関数u_FTBS(u_n)を定義する。
+    ! u^n(i=1~meshnumxベクトル)をうけて、u^n+1(i=1~meshnumxベクトル)をLax_wendroffで周期境界条件のもと返す関数u_LaxWendroff(u_n)を定義する。
+
+    !==========解析解=============
+        real(8) function u_init(x)
+            !初期条件u_0(x)
+            implicit none
+            real(8), intent(in) :: x
+            u_init = sin(2.0_8*pi*x)
+        end function u_init
+
+        real(8) function u_actual(x,t,c)
+            ! 解析解(u(x,t)=u_0(x=x-ct))
+            implicit none
+            real(8),intent(in)::x,t,c
+            u_actual = u_init(x-t*c)
+        end function u_actual
+    !==========================
+
+    !===一次元風上差分による更新========
+        subroutine u_FTBS_update(u_old,u_new,c,delta_t,delta_x)
+            implicit none
+            real(8) , allocatable :: u_old(:)
+            real(8) , allocatable :: u_new(:)
+            real(8) , intent(in) :: c,delta_t,delta_x
+            integer :: i
+            if(.not. (size(u_old) == size(u_new))) then
+                write(*,*) "array size miss match at subroutine u_FTBS_update"
+            end if
+
+            do i=lbound(u_old,1)+1,ubound(u_old,1)
+                u_new(i) = u_old(i)-(c*delta_t/delta_x)*(u_old(i)-u_old(i-1))
+            end do
+            !周期境界
+            u_new(lbound(u_new,1)) = u_old(lbound(u_old,1))-(c*delta_t/delta_x)*(u_old(lbound(u_old,1))-u_old(ubound(u_old,1)))
+
+        end subroutine u_FTBS_update
+    !===============================
+
+    !====Lax-wendroffによる更新========
+        subroutine u_Lax_update(u_old,u_new,c,delta_t,delta_x)
+            implicit none
+            real(8) , allocatable :: u_old(:)
+            real(8) , allocatable :: u_new(:)
+            real(8) , intent(in) :: c,delta_t,delta_x
+            real(8) :: courant_num
+            integer :: i
+
+            courant_num = c*delta_t/delta_x
+
+            if(.not. (size(u_old) == size(u_new))) then
+                write(*,*) "array size miss match at subroutine u_FTBS_update"
+            end if
+
+            do i = lbound(u_old,1)+1,ubound(u_old,1 )-1
+                u_new(i) = u_old(i) - 0.5_8*courant_num*(u_old(i+1)-u_old(i-1)) + 0.5_8 * (courant_num**2.0_8) * (u_old(i+1)-2.0_8*u_old(i)+u_old(i-1))
+            end do
+
+            !周期境界（二つ！）
+            u_new(lbound(u_new,1)) = u_old(lbound(u_old,1)) - 0.5_8*courant_num*(u_old(lbound(u_old,1)+1)-u_old(ubound(u_old,1))) + 0.5_8 * (courant_num**2.0_8) * (u_old(lbound(u_old,1)+1)-2.0_8*u_old(lbound(u_old,1))+u_old(ubound(u_old,1)))
+            u_new(ubound(u_new,1)) = u_old(ubound(u_old,1)) - 0.5_8*courant_num*(u_old(lbound(u_old,1))-u_old(ubound(u_old,1)-1)) + 0.5_8 * (courant_num**2.0_8) * (u_old(lbound(u_old,1))-2.0_8*u_old(ubound(u_old,1))+u_old(ubound(u_old,1)-1))
+
+        end subroutine u_Lax_update
+
+
+    !================================
+
+
+end program main

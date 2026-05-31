@@ -1,1 +1,3 @@
 # numeric_geophysics_report1
+
+今回用いたコードの一例を格納している。出力はgnuplot及びffmpegで行った。
